@@ -1,0 +1,108 @@
+---
+
+
+# ------------ SETTING PROCESSING FACTS -----------------------------
+
+- name: Use CASE files by default
+  set_fact:
+    _use_case_files: True
+
+- name: Ignore False value for use_case_files when private registry is used
+  block:
+  - name: Check the configuration for the use of CASE files
+    set_fact:
+     _use_case_files: False
+    when: (not current_cp4i_cluster.use_case_files | default(True) | bool)
+  when: not (_use_entitled_registry | bool)
+
+- name: Install operators in all namespaces by default
+  set_fact:
+    _operators_in_all_namespaces: True
+
+- name: Check the configuration for the operators visbility
+  set_fact:
+    _operators_in_all_namespaces: False
+  when: (not current_cp4i_cluster.operators_in_all_namespaces | default(True) | bool)
+
+- debug:
+    msg: "Using CASE files: {{ _use_case_files }}"
+
+- debug:
+    msg: "Operators visible in all namespaces: {{ _operators_in_all_namespaces }}"
+
+
+# ------------ DOWLOADING CASE FILES, MIRRORING IMAGES --------------
+
+- name: Download CASE files
+  block:
+  - name: Loop through instances and download CASE files for defined types
+    include_tasks: download-case-file.yml
+    loop: "{{ current_cp4i_cluster.instances | default([]) }}"
+    loop_control:
+      loop_var: current_cp4i_instance
+  when: _use_case_files and (_use_entitled_registry | bool)
+
+
+# ------------ OPENSHIFT OBJECTS ------------------------------------
+
+- name: "Get OpenShift storage classes to use for {{ current_cp4i_cluster.project }} and storage class name {{ current_cp4i_cluster.openshift_storage_name }}"
+  include_role: 
+    name: get-openshift-storage
+  vars:
+    _p_openshift_cluster_name: "{{ current_cp4i_cluster.openshift_cluster_name }}"
+    _p_openshift_storage_name: "{{ current_cp4i_cluster.openshift_storage_name }}"
+
+- name: "Prepare OpenShift project {{ current_cp4i_cluster.project }} for Cloud Pak for Integration"
+  include_tasks: openshift-prepare-project.yml
+
+- name: Create entitlement key secret when entitled registry is used
+  block:
+    # NOTE(SJ) This could be skipped because we add entitled key in 
+    # the cluster's global pull secret
+    - name: Create entitlement key secret
+      include_tasks: create-entitlement-key-secret.yml
+  when: (_use_entitled_registry | bool)
+
+# ------------ CREATING CATALOG SOURCES -----------------------------
+
+- name: Create catalog sources for entitled registry when not using CASE files
+  include_tasks: create-catalog-sources-entitled.yml
+  when: not _use_case_files
+
+- name: Create catalog sources when using CASE files
+  include_tasks: create-catalog-source-case-file.yml
+  loop: "{{ current_cp4i_cluster.instances | default([]) }}"
+  loop_control:
+    loop_var: current_cp4i_instance
+  when: _use_case_files
+
+# ------------ INSTALLING OPERATORS ---------------------------------
+
+- name: Prepare operator group if installing in specific namespace
+  include_tasks: prepare-operator-group.yml
+  when: not _operators_in_all_namespaces
+  
+- name: Install operators for each needed instance type
+  include_tasks: install-operator.yml
+  loop: "{{ current_cp4i_cluster.instances | default([]) }}"
+  loop_control:
+    loop_var: current_cp4i_instance
+
+# ------------ INTEGRATION INSTANCES --------------------------------
+
+- name: Create instances of CP4I capabilities and runtimes
+  include_tasks: create-instance.yml
+  loop: "{{ current_cp4i_cluster.instances | default([]) }}"
+  loop_control:
+    loop_var: current_cp4i_instance
+
+# ------------ FINALIZING -------------------------------------------
+
+- name: Output Cloud pak for Integration URL and admin password
+  include_role:
+    name: cp4i-cluster-show
+
+- name: Ensure the status log folder exists
+  file:
+    path: "{{status_dir}}/log"
+    state: directory

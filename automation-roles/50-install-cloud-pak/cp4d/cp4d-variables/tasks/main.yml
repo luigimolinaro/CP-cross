@@ -1,0 +1,207 @@
+---
+- name: Create Cloud Pak for Data directory for generated files
+  file:
+    path: "{{ status_dir }}/cp4d"
+    state: directory
+
+- name: Redirect /tmp/work to {{ status_dir }}/cp4d
+  file:
+    path: /tmp/work
+    src: "{{ status_dir }}/cp4d"
+    state: link
+
+- name: Include variables for Cloud Pak for Data
+  include_vars: vars-cp4d-installation.yml
+
+- debug:
+    var: implemented_cloud_platform_types
+
+- set_fact:
+    _cartridges_with_olm_utils_name: []
+    _cartridges_to_install: []
+    _cartridge_dependencies: []
+
+- name: Obtain versions of case files and cartridges
+  include_tasks: list-components-olm-utils.yml
+  when: _list_components_json is not defined
+
+- name: Get cartridges with CR details
+  set_fact:
+    _cartridges_with_olm_utils_name: >-
+      {{ _cartridges_with_olm_utils_name | default([]) 
+        + [ item | combine(_cartridge_cr_item) | combine(_cartridge_olm_utils_item) ]
+      }}
+  vars:
+    _cartridge_cr_item: >-
+          {{ cartridge_cr
+            | selectattr('name','equalto',item['name'])
+            | list
+            | first
+            | default([])
+          }}
+    _cartridge_olm_utils_item: >-
+          {{ cartridge_cr
+            | selectattr('olm_utils_name','equalto',item['name'])
+            | list
+            | first
+            | default([])
+          }}
+  loop: "{{ _p_current_cp4d_cluster.cartridges }}"
+  no_log: True
+
+- set_fact:
+    _undefined_cartridges: "{{ _cartridges_with_olm_utils_name | rejectattr('olm_utils_name','defined') }}"
+
+- name: Fail if there were undefined cartridges found
+  fail:
+    msg: "Not all cartridges in the configuration are valid: {{ _undefined_cartridges }}"
+  when: _undefined_cartridges!=[]
+
+- name: Add versions details from olm-utils
+  set_fact:
+    _cartridges_to_install: >-
+      {{ _cartridges_to_install | default([]) 
+        + [ item | combine(_list_components_json_item) ]
+      }}
+  vars:
+    _list_components_json_item: >-
+          {{ _list_components_json.list
+            | selectattr('Component_name','equalto',item['olm_utils_name'])
+            | list
+            | first
+            | default([])
+          }}
+  loop: "{{ _cartridges_with_olm_utils_name }}"
+
+- set_fact:
+    _dp_cartridge: >-
+      {{ _cartridges_to_install | selectattr('Component_name','match','dp') | default({}) }}
+
+- debug:
+    var: _dp_cartridge
+
+- set_fact:
+    _tmp_cartridges: "{{ _cartridges_to_install | rejectattr('Component_name','match','dp') }}"
+
+- set_fact:
+    _cartridges_to_install: >-
+      {{ _tmp_cartridges + _dp_cartridge }}
+
+- set_fact:
+    _all_cartridges: "{{ _cartridges_to_install }}"
+
+- set_fact:
+    _upgrade_cp4d: False
+
+- name: Determine if CP4D must be upgraded
+  include_tasks: check-cp4d-upgrade.yml
+  loop_control:
+    loop_var: _current_cartridge_details
+  when: 
+  - (_current_cartridge_details.state | default('installed')) == 'installed'
+  - (_current_cartridge_details.CR_Kind | default('')) != ''
+  - (_current_cartridge_details.CR_Kind | default('')) != '--'
+  loop: "{{ _cartridges_to_install }}"
+
+- name: Show if upgrade of CP4D in project {{ _p_current_cp4d_cluster.project }} must be done
+  debug:
+    var: _upgrade_cp4d
+
+- block:
+
+  - name: Generate migrate-private-topology scripts
+    include_role:
+      name: cp4d-migrate-private-topology
+    vars:
+      _p_preview: True
+      
+  - name: Fail if trying to upgrade to 4.7
+    fail:
+      msg: "Cloud Pak Deployer does not support upgrading to CP4D 4.7 at the moment. Please consult Cloud Pak for Data documentation for upgrade steps. For convenience, the {{ status_dir }}/cp4d/{{ _p_current_cp4d_cluster.project }}-migrate-private-topology.sh script has the steps to migrate to the private topology."
+  when:
+    - _upgrade_cp4d
+    - _p_current_cp4d_cluster.cp4d_version >= "4.7.0"
+    - _installed_ibmcpd_version < "4.7.0"
+    - not allow_cp4d_upgrade | default(False) | bool
+
+- set_fact:
+    _sequential_install: "{{ _p_current_cp4d_cluster.sequential_install | default(True) | bool }}"
+
+- name: Force sequential install if CP4D must be upgraded
+  set_fact:
+    _sequential_install: "{{ _sequential_install or _upgrade_cp4d }}"
+
+- name: Determine if CP4D services must be installed sequentially
+  set_fact:
+    _sequential_install: "{{ _sequential_install or item.force_sequential_install }}"
+  when: (item.state | default('installed')) == 'installed'
+  loop: "{{ _cartridges_to_install }}"
+  no_log: True
+
+- name: Show if sequential install is done
+  debug:
+    var: _sequential_install
+
+- name: Determine cartridge dependencies
+  set_fact:
+    _cartridge_dependencies: >-
+      {{ _cartridge_dependencies + ( item.Dependencies.split('+') | map("trim") | list | reject('match','^$') | list ) | unique }}
+  when: (item.state | default('installed')) == 'installed'
+  loop: "{{ _cartridges_to_install }}"
+  no_log: True
+
+- name: Remove duplicate entries from cartridge dependencies
+  set_fact:
+    _cartridge_dependencies: >-
+      {{ _cartridge_dependencies | unique }}
+
+- name: Show cartridge dependencies
+  debug:
+    var: _cartridge_dependencies
+
+- name: Show full cartridge information
+  debug:
+    var: _cartridges_to_install
+
+- name: Generate CP4D components based on cartridges to install
+  set_fact:
+    _cp4d_components: "{{ lookup('template','generate-cp4d-components.j2') }}"
+
+- debug: 
+    var: _cp4d_components
+
+- name: Obtain surviving cartridges
+  set_fact:
+    _surviving_cartridges_names: "{{ _cartridges_to_install | json_query(jmes_query) }} + {{ _cartridge_dependencies }}"
+  vars:
+    jmes_query: "[?state=='installed'].olm_utils_name"
+
+- debug:
+    var: _surviving_cartridges_names
+
+- name: Determine the surviving cartridges
+  set_fact:
+    _surviving_cartridges: >-
+      {{ _surviving_cartridges | default([]) 
+        + [ _cartridges_to_install_item ]
+      }}
+  vars:
+    _cartridges_to_install_item: >-
+          {{ _cartridges_to_install
+            | selectattr('olm_utils_name','equalto',item)
+            | list
+            | first
+            | default({})
+          }}
+  loop: "{{ _surviving_cartridges_names }}"
+
+- set_fact:
+    _surviving_cartridges: "{{ _surviving_cartridges | default([]) | rejectattr('CR_Kind','undefined') }}"
+
+- debug:
+    var: _surviving_cartridges
+
+- name: Write cartridge information to file {{ status_dir }}/log/{{ _p_current_cp4d_cluster.project }}-cartridges.json
+  copy:
+    content: "{{ _cartridges_to_install | default([]) | to_json }}"
+    dest: "{{ status_dir }}/log/{{ _p_current_cp4d_cluster.project }}-cartridges.json"
