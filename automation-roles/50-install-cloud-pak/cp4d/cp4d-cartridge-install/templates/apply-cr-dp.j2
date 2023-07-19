@@ -4,6 +4,7 @@
     --preview={%- if _p_preview_script -%}true{%- else -%}false{%- endif %} \
     --upgrade={%- if _upgrade_cp4d -%}true{%- else -%}false{%- endif %} \
     -v \
+    --cs_ns=cp4d \
     --cpd_instance_ns={{ _p_current_cp4d_cluster.project }} \
     --components={{ _current_cp4d_cartridge.olm_utils_name }} \
 {%- if _storage_type == "pwx" -%}

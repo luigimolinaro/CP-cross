@@ -3,4 +3,5 @@
     --license_acceptance={{ _cpd_accept_licenses | default(False) | string | lower }} \
     -v \
     --cpd_instance_ns={{ _p_current_cp4d_cluster.project }} \
-    --components=scheduler
+    --components=scheduler \
+    --cs_ns=cp4d

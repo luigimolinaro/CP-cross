@@ -4,6 +4,7 @@
     --preview={{ _p_preview_script | default(False) | string | lower }} \
     --upgrade={{ _upgrade_cp4d | default(False) | string | lower }} \
     -v \
+    --cs_ns=cp4d \
     --cpd_instance_ns={{ _p_current_cp4d_cluster.project }} \
     --param-file={{ status_dir }}/cp4d/{{ _p_current_cp4d_cluster.project }}-install-options.yml \
     --components={% for c in _cartridges_to_install -%}
