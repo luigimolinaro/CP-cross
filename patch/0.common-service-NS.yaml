@@ -10,9 +10,6 @@ data:
       - map-to-common-service-namespace: cp4d
         requested-from-namespace:
           - cp4d
-      - map-to-common-service-namespace: cp4i
-        requested-from-namespace:
-          - cp4i
       - map-to-common-service-namespace: cp4s-cs
         requested-from-namespace:
           - cp4s
